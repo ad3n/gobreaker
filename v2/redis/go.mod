@@ -1,4 +1,4 @@
-module github.com/sony/gobreaker/v2/redis
+module github.com/ad3n/gobreaker/v2/redis
 
 go 1.26.0
 
@@ -6,7 +6,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.33.0
 	github.com/go-redsync/redsync/v4 v4.13.0
 	github.com/redis/go-redis/v9 v9.7.3
-	github.com/sony/gobreaker/v2 v2.0.0
+	github.com/ad3n/gobreaker/v2 v2.0.0
 	github.com/stretchr/testify v1.8.4
 )
 
@@ -22,4 +22,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/sony/gobreaker/v2 => ../
+replace github.com/ad3n/gobreaker/v2 => ../

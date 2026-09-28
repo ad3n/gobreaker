@@ -1,4 +1,4 @@
-module github.com/sony/gobreaker
+module github.com/ad3n/gobreaker
 
 go 1.26.0
 

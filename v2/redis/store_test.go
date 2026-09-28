@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ad3n/gobreaker/v2"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-redsync/redsync/v4"
 	"github.com/go-redsync/redsync/v4/redis/goredis/v9"
 	"github.com/redis/go-redis/v9"
-	"github.com/sony/gobreaker/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
