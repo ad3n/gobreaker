@@ -66,7 +66,7 @@ func TestTwoStepCircuitBreaker(t *testing.T) {
 	)
 	assert.Equal(t, "tscb", tscb.Name())
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.Nil(t, fail2Step(tscb))
 	}
 
@@ -81,10 +81,10 @@ func TestTwoStepCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, tscb.State())
 	assert.Equal(t, Counts{Requests: 7, TotalSuccesses: 1, TotalFailures: 6, ConsecutiveFailures: 1}, tscb.cb.Counts())
 
-	// StateClosed to StateOpen
-	for i := 0; i < 5; i++ {
-		assert.Nil(t, fail2Step(tscb)) // 6 consecutive failures
+	for range 5 {
+		assert.Nil(t, fail2Step(tscb))
 	}
+
 	assert.Equal(t, StateOpen, tscb.State())
 	assert.Equal(t, Counts{}, tscb.cb.Counts())
 	assert.False(t, tscb.cb.expiry.IsZero())
@@ -97,39 +97,32 @@ func TestTwoStepCircuitBreaker(t *testing.T) {
 	pseudoSleep(tscb.cb, tscb.cb.timeout-time.Millisecond)
 	assert.Equal(t, StateOpen, tscb.State())
 
-	// StateOpen to StateHalfOpen
-	pseudoSleep(tscb.cb, time.Second) // over timeout
+	pseudoSleep(tscb.cb, time.Second)
 	assert.Equal(t, StateHalfOpen, tscb.State())
 	assert.True(t, tscb.cb.expiry.IsZero())
 
-	// in half-open state, when max number of requests are in progress,
-	// others get rejected because of too many requests
-	// but if in-progress requests complete with excluded, circuit breaker can accept requests again
 	ch1, err := exclude2StepWithDelay(tscb)
 	assert.Nil(t, err)
 	ch2, err := exclude2StepWithDelay(tscb)
 	assert.Nil(t, err)
-	// rejected because of too many requests
+
 	assert.Equal(t, ErrTooManyRequests, succeed2Step(tscb))
 	assert.Equal(t, ErrTooManyRequests, fail2Step(tscb))
-	// wait for excluded requests to complete
+
 	<-ch1
 	<-ch2
-	// now circuit breaker should accept requests again
+
 	assert.Nil(t, succeed2Step(tscb))
 
-	// StateHalfOpen to StateOpen
 	assert.Nil(t, fail2Step(tscb))
 	assert.Equal(t, StateOpen, tscb.State())
 	assert.Equal(t, Counts{}, tscb.cb.Counts())
 	assert.False(t, tscb.cb.expiry.IsZero())
 
-	// StateOpen to StateHalfOpen
 	pseudoSleep(tscb.cb, tscb.cb.timeout+time.Nanosecond)
 	assert.Equal(t, StateHalfOpen, tscb.State())
 	assert.True(t, tscb.cb.expiry.IsZero())
 
-	// StateHalfOpen to StateClosed
 	assert.Nil(t, succeed2Step(tscb))
 	assert.Nil(t, succeed2Step(tscb))
 	assert.Equal(t, StateClosed, tscb.State())

@@ -1,6 +1,6 @@
 module github.com/sony/gobreaker/v2/redis
 
-go 1.22.0
+go 1.26.0
 
 require (
 	github.com/alicebob/miniredis/v2 v2.33.0

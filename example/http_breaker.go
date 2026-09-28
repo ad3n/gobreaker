@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"log"
 	"net/http"
 
@@ -22,16 +22,16 @@ func init() {
 	cb = gobreaker.NewCircuitBreaker(st)
 }
 
-// Get wraps http.Get in CircuitBreaker.
 func Get(url string) ([]byte, error) {
-	body, err := cb.Execute(func() (interface{}, error) {
+	body, err := cb.Execute(func() (any, error) {
 		resp, err := http.Get(url)
 		if err != nil {
 			return nil, err
 		}
 
 		defer resp.Body.Close()
-		return ioutil.ReadAll(resp.Body)
+
+		return io.ReadAll(resp.Body)
 	})
 	if err != nil {
 		return nil, err

@@ -8,6 +8,8 @@ gobreaker
 Installation
 ------------
 
+Requires Go 1.26 or newer.
+
 ```
 go get github.com/sony/gobreaker/v2
 ```

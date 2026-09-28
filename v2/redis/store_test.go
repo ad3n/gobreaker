@@ -15,6 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var _ gobreaker.SharedDataStore = (*Store)(nil)
+
 func setupTestRedis() (*miniredis.Miniredis, *Store) {
 	mr, err := miniredis.Run()
 	if err != nil {
@@ -29,7 +31,7 @@ func setupTestRedis() (*miniredis.Miniredis, *Store) {
 		ctx:    context.Background(),
 		client: client,
 		rs:     redsync.New(goredis.NewPool(client)),
-		mutex:  map[string]*redsync.Mutex{},
+		mutex:  map[string]*storeLock{},
 	}
 
 	return mr, store
@@ -43,8 +45,6 @@ func TestNewRedisStore(t *testing.T) {
 	store := NewStore(mr.Addr())
 	assert.NotNil(t, store)
 
-	// Test that it implements the interface
-	var _ gobreaker.SharedDataStore = store
 }
 
 func TestNewRedisStoreFromClient(t *testing.T) {
@@ -59,16 +59,14 @@ func TestNewRedisStoreFromClient(t *testing.T) {
 	store := NewStoreFromClient(client)
 	assert.NotNil(t, store)
 
-	// Test that it implements the interface
-	var _ gobreaker.SharedDataStore = store
 }
 
 func TestRedisStore_SetData_GetData(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test setting and getting data
 	testData := []byte("test data")
 	err := store.SetData("test-key", testData)
 	assert.NoError(t, err)
@@ -77,7 +75,6 @@ func TestRedisStore_SetData_GetData(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, testData, retrievedData)
 
-	// Test getting non-existent key
 	emptyData, err := store.GetData("non-existent")
 	assert.Error(t, err)
 	assert.Nil(t, emptyData)
@@ -86,9 +83,9 @@ func TestRedisStore_SetData_GetData(t *testing.T) {
 func TestRedisStore_SetData_GetData_Empty(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test setting empty data
 	err := store.SetData("empty-key", []byte{})
 	assert.NoError(t, err)
 
@@ -100,10 +97,10 @@ func TestRedisStore_SetData_GetData_Empty(t *testing.T) {
 func TestRedisStore_SetData_GetData_LargeData(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test with large data
-	largeData := make([]byte, 1024*1024) // 1MB
+	largeData := make([]byte, 1024*1024)
 	for i := range largeData {
 		largeData[i] = byte(i % 256)
 	}
@@ -119,9 +116,9 @@ func TestRedisStore_SetData_GetData_LargeData(t *testing.T) {
 func TestRedisStore_SetData_GetData_SpecialCharacters(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test with special characters in key and data
 	specialKey := "test:key:with:colons"
 	specialData := []byte("data with spaces and \n newlines \t tabs")
 
@@ -136,9 +133,9 @@ func TestRedisStore_SetData_GetData_SpecialCharacters(t *testing.T) {
 func TestRedisStore_Lock_Unlock(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test basic lock/unlock
 	err := store.Lock("test-mutex")
 	assert.NoError(t, err)
 
@@ -149,9 +146,9 @@ func TestRedisStore_Lock_Unlock(t *testing.T) {
 func TestRedisStore_Lock_Unlock_MultipleKeys(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test multiple different mutex keys
 	mutexKeys := []string{"mutex1", "mutex2", "mutex3"}
 
 	for _, key := range mutexKeys {
@@ -166,12 +163,12 @@ func TestRedisStore_Lock_Unlock_MultipleKeys(t *testing.T) {
 func TestRedisStore_Lock_Unlock_SameKeyMultipleTimes(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test locking and unlocking the same key multiple times
 	key := "repeated-mutex"
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		err := store.Lock(key)
 		assert.NoError(t, err)
 
@@ -183,9 +180,9 @@ func TestRedisStore_Lock_Unlock_SameKeyMultipleTimes(t *testing.T) {
 func TestRedisStore_Unlock_WithoutLock(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test unlocking without first locking
 	err := store.Unlock("unlocked-mutex")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "unlock failed")
@@ -194,6 +191,7 @@ func TestRedisStore_Unlock_WithoutLock(t *testing.T) {
 func TestRedisStore_MutexCleanup(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
 	key := "cleanup-test-mutex"
@@ -214,21 +212,21 @@ func TestRedisStore_MutexCleanup(t *testing.T) {
 func TestRedisStore_Concurrent_Operations(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test concurrent set/get operations
 	const numGoroutines = 10
 	const numOperations = 100
 
 	done := make(chan bool, numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer func() { done <- true }()
 
-			for j := 0; j < numOperations; j++ {
+			for j := range numOperations {
 				key := fmt.Sprintf("concurrent-key-%d-%d", id, j)
-				data := []byte(fmt.Sprintf("data-%d-%d", id, j))
+				data := fmt.Appendf(nil, "data-%d-%d", id, j)
 
 				err := store.SetData(key, data)
 				assert.NoError(t, err)
@@ -240,8 +238,7 @@ func TestRedisStore_Concurrent_Operations(t *testing.T) {
 		}(i)
 	}
 
-	// Wait for all goroutines to complete
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		<-done
 	}
 }
@@ -249,25 +246,24 @@ func TestRedisStore_Concurrent_Operations(t *testing.T) {
 func TestRedisStore_Concurrent_Locks(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
+
 	defer store.Close()
 
-	// Test concurrent lock/unlock operations
 	const numGoroutines = 5
 	const numOperations = 50
 
 	done := make(chan bool, numGoroutines)
 
-	for i := 0; i < numGoroutines; i++ {
+	for i := range numGoroutines {
 		go func(id int) {
 			defer func() { done <- true }()
 
-			for j := 0; j < numOperations; j++ {
+			for j := range numOperations {
 				key := fmt.Sprintf("concurrent-mutex-%d-%d", id, j)
 
 				err := store.Lock(key)
 				assert.NoError(t, err)
 
-				// Simulate some work
 				time.Sleep(1 * time.Millisecond)
 
 				err = store.Unlock(key)
@@ -276,8 +272,7 @@ func TestRedisStore_Concurrent_Locks(t *testing.T) {
 		}(i)
 	}
 
-	// Wait for all goroutines to complete
-	for i := 0; i < numGoroutines; i++ {
+	for range numGoroutines {
 		<-done
 	}
 }
@@ -286,12 +281,10 @@ func TestRedisStore_Close(t *testing.T) {
 	mr, store := setupTestRedis()
 	defer mr.Close()
 
-	// Test that Close doesn't panic
 	assert.NotPanics(t, func() {
 		store.Close()
 	})
 
-	// Test that Close can be called multiple times
 	assert.NotPanics(t, func() {
 		store.Close()
 	})
@@ -309,7 +302,6 @@ func TestRedisStore_Integration_WithDistributedCircuitBreaker(t *testing.T) {
 		}
 	}()
 
-	// Test that the store works with the distributed circuit breaker
 	dcb, err := gobreaker.NewDistributedCircuitBreaker[any](store, gobreaker.Settings{
 		Name:        "TestBreaker",
 		MaxRequests: 3,
@@ -322,8 +314,7 @@ func TestRedisStore_Integration_WithDistributedCircuitBreaker(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, dcb)
 
-	// Test basic execution
-	result, err := dcb.Execute(func() (interface{}, error) {
+	result, err := dcb.Execute(func() (any, error) {
 		return "success", nil
 	})
 	assert.NoError(t, err)
@@ -331,7 +322,7 @@ func TestRedisStore_Integration_WithDistributedCircuitBreaker(t *testing.T) {
 }
 
 func TestRedisStore_Error_Handling(t *testing.T) {
-	// Test with invalid Redis address
+
 	store := NewStore("invalid-address:6379")
 	defer func() {
 		if rs, ok := store.(*Store); ok {
@@ -339,7 +330,6 @@ func TestRedisStore_Error_Handling(t *testing.T) {
 		}
 	}()
 
-	// These operations should fail due to connection issues
 	err := store.SetData("test", []byte("data"))
 	assert.Error(t, err)
 

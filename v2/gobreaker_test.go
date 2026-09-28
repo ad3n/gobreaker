@@ -51,6 +51,7 @@ func fail(cb *CircuitBreaker[bool]) error {
 	if errors.Is(err, errFailed) {
 		return nil
 	}
+
 	return err
 }
 
@@ -59,6 +60,7 @@ func exclude(cb *CircuitBreaker[bool]) error {
 	if errors.Is(err, errExcluded) {
 		return nil
 	}
+
 	return err
 }
 
@@ -86,6 +88,7 @@ func newCustom(stateChange *StateChange) *CircuitBreaker[bool] {
 			*stateChange = StateChange{name, from, to}
 		}
 	}
+
 	return NewCircuitBreaker[bool](customSt)
 }
 
@@ -109,6 +112,7 @@ func newRollingWindow(stateChange *StateChange) *CircuitBreaker[bool] {
 			*stateChange = StateChange{name, from, to}
 		}
 	}
+
 	return NewCircuitBreaker[bool](rollingWindowSt)
 }
 
@@ -183,9 +187,10 @@ func TestDefaultCircuitBreaker(t *testing.T) {
 	defaultCB := NewCircuitBreaker[bool](Settings{})
 	assert.Equal(t, "", defaultCB.Name())
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.Nil(t, fail(defaultCB))
 	}
+
 	assert.Equal(t, StateClosed, defaultCB.State())
 	assert.Equal(t, Counts{Requests: 5, TotalFailures: 5, ConsecutiveFailures: 5}, defaultCB.Counts())
 
@@ -197,10 +202,10 @@ func TestDefaultCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, defaultCB.State())
 	assert.Equal(t, Counts{Requests: 7, TotalSuccesses: 1, TotalFailures: 6, ConsecutiveFailures: 1}, defaultCB.Counts())
 
-	// StateClosed to StateOpen
-	for i := 0; i < 5; i++ {
-		assert.Nil(t, fail(defaultCB)) // 6 consecutive failures
+	for range 5 {
+		assert.Nil(t, fail(defaultCB))
 	}
+
 	assert.Equal(t, StateOpen, defaultCB.State())
 	assert.Equal(t, Counts{}, defaultCB.Counts())
 	assert.False(t, defaultCB.expiry.IsZero())
@@ -212,23 +217,19 @@ func TestDefaultCircuitBreaker(t *testing.T) {
 	pseudoSleep(defaultCB, defaultCB.timeout-time.Millisecond)
 	assert.Equal(t, StateOpen, defaultCB.State())
 
-	// StateOpen to StateHalfOpen
-	pseudoSleep(defaultCB, time.Second) // over Timeout
+	pseudoSleep(defaultCB, time.Second)
 	assert.Equal(t, StateHalfOpen, defaultCB.State())
 	assert.True(t, defaultCB.expiry.IsZero())
 
-	// StateHalfOpen to StateOpen
 	assert.Nil(t, fail(defaultCB))
 	assert.Equal(t, StateOpen, defaultCB.State())
 	assert.Equal(t, Counts{}, defaultCB.Counts())
 	assert.False(t, defaultCB.expiry.IsZero())
 
-	// StateOpen to StateHalfOpen
 	pseudoSleep(defaultCB, defaultCB.timeout+time.Nanosecond)
 	assert.Equal(t, StateHalfOpen, defaultCB.State())
 	assert.True(t, defaultCB.expiry.IsZero())
 
-	// StateHalfOpen to StateClosed
 	assert.Nil(t, succeed(defaultCB))
 	assert.Equal(t, StateClosed, defaultCB.State())
 	assert.Equal(t, Counts{}, defaultCB.Counts())
@@ -240,11 +241,12 @@ func TestCustomCircuitBreaker(t *testing.T) {
 	customCB := newCustom(&stateChange)
 	assert.Equal(t, "cb", customCB.Name())
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.Nil(t, succeed(customCB))
 		assert.Nil(t, fail(customCB))
 		assert.Nil(t, exclude(customCB))
 	}
+
 	assert.Equal(t, StateClosed, customCB.State())
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, customCB.Counts())
 
@@ -253,60 +255,47 @@ func TestCustomCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, customCB.State())
 	assert.Equal(t, Counts{Requests: 16, TotalSuccesses: 6, TotalFailures: 5, TotalExclusions: 5, ConsecutiveSuccesses: 1}, customCB.Counts())
 
-	pseudoSleep(customCB, time.Second) // over Interval
+	pseudoSleep(customCB, time.Second)
 	assert.Nil(t, fail(customCB))
 	assert.Equal(t, StateClosed, customCB.State())
 	assert.Equal(t, Counts{Requests: 1, TotalFailures: 1, ConsecutiveFailures: 1}, customCB.Counts())
 
-	// StateClosed to StateOpen
 	assert.Nil(t, succeed(customCB))
-	assert.Nil(t, fail(customCB)) // failure ratio: 2/3 >= 0.6
+	assert.Nil(t, fail(customCB))
 	assert.Equal(t, StateOpen, customCB.State())
 	assert.Equal(t, Counts{}, customCB.Counts())
 	assert.False(t, customCB.expiry.IsZero())
 	assert.Equal(t, StateChange{"cb", StateClosed, StateOpen}, stateChange)
 
-	// StateOpen to StateHalfOpen
 	pseudoSleep(customCB, customCB.timeout+time.Nanosecond)
 	assert.Equal(t, StateHalfOpen, customCB.State())
 	assert.True(t, customCB.expiry.IsZero())
 	assert.Equal(t, StateChange{"cb", StateOpen, StateHalfOpen}, stateChange)
 
-	// Excluded requests are neutral in Half-Open state.
-	// They do not affect breaker counts or state transitions.
-	// The condition to stay within MaxRequests should be evaluated as:
-	// cb.counts.Requests - cb.counts.TotalExclusions < cb.maxRequests
-	// This ensures excluded requests do not cause premature errors.
 	assert.Nil(t, exclude(customCB))
 	assert.Nil(t, exclude(customCB))
 	assert.Nil(t, exclude(customCB))
 	assert.Nil(t, exclude(customCB))
 	assert.Equal(t, StateHalfOpen, customCB.State())
 
-	// Transition: Half-Open → Open
-	// In Half-Open, the first real failure immediately re-opens the breaker.
 	assert.Nil(t, fail(customCB))
 	assert.Equal(t, StateOpen, customCB.State())
 	assert.Equal(t, Counts{}, customCB.Counts())
 	assert.False(t, customCB.expiry.IsZero())
 	assert.Equal(t, StateChange{"cb", StateHalfOpen, StateOpen}, stateChange)
 
-	// Transition: Open → Half-Open (after timeout expires).
 	pseudoSleep(customCB, customCB.timeout+time.Nanosecond)
 	assert.Equal(t, StateHalfOpen, customCB.State())
 
-	// Successes increment counters but do not
-	// close the breaker until the MaxRequests threshold is satisfied.
 	assert.Nil(t, succeed(customCB))
 	assert.Nil(t, succeed(customCB))
 	assert.Equal(t, StateHalfOpen, customCB.State())
 	assert.Equal(t, Counts{Requests: 2, TotalSuccesses: 2, ConsecutiveSuccesses: 2}, customCB.Counts())
 
-	// StateHalfOpen to StateClosed
-	ch := succeedLater(customCB, time.Duration(100)*time.Millisecond) // 3 consecutive successes
+	ch := succeedLater(customCB, time.Duration(100)*time.Millisecond)
 	time.Sleep(time.Duration(50) * time.Millisecond)
 	assert.Equal(t, Counts{Requests: 3, TotalSuccesses: 2, ConsecutiveSuccesses: 2}, customCB.Counts())
-	assert.Error(t, succeed(customCB)) // over MaxRequests
+	assert.Error(t, succeed(customCB))
 	assert.Nil(t, <-ch)
 	assert.Equal(t, StateClosed, customCB.State())
 	assert.Equal(t, Counts{}, customCB.Counts())
@@ -319,11 +308,12 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 	rollingCB := newRollingWindow(&stateChange)
 	assert.Equal(t, "rw", rollingCB.Name())
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.Nil(t, succeed(rollingCB))
 		assert.Nil(t, fail(rollingCB))
 		assert.Nil(t, exclude(rollingCB))
 	}
+
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, rollingCB.Counts())
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
@@ -334,7 +324,7 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, Counts{Requests: 16, TotalSuccesses: 6, TotalFailures: 5, TotalExclusions: 5, ConsecutiveSuccesses: 1}, rollingCB.Counts())
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
-	// With circular buffer, previous bucket is at (current-1+len) % len
+
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, rollingCB.counts.bucketAt(-1))
 	assert.Equal(t, Counts{Requests: 1, TotalSuccesses: 1, ConsecutiveSuccesses: 1}, rollingCB.counts.bucketAt(0))
 
@@ -344,23 +334,23 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
 	assert.Equal(t, Counts{Requests: 18, TotalSuccesses: 7, TotalFailures: 5, TotalExclusions: 6, ConsecutiveSuccesses: 2}, rollingCB.Counts())
-	// Previous bucket index
+
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, rollingCB.counts.bucketAt(-1))
 	assert.Equal(t, Counts{Requests: 3, TotalSuccesses: 2, ConsecutiveSuccesses: 2, TotalExclusions: 1}, rollingCB.counts.bucketAt(0))
 
 	pseudoSleep(rollingCB, time.Duration(2)*time.Second)
-	// Capture age before undetermined request
+
 	beforeAge := rollingCB.counts.age
-	// Run an undetermined request
+
 	assert.Nil(t, exclude(rollingCB))
-	// Age should increase
+
 	assert.Greater(t, rollingCB.counts.age, beforeAge)
-	// Next success should increment counts normally
+
 	assert.Nil(t, succeed(rollingCB))
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, Counts{Requests: 20, TotalSuccesses: 8, TotalFailures: 5, TotalExclusions: 7, ConsecutiveSuccesses: 3}, rollingCB.Counts())
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
-	// Calculate indices for buckets relative to current
+
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, rollingCB.counts.bucketAt(-2))
 	assert.Equal(t, Counts{Requests: 3, TotalSuccesses: 2, ConsecutiveSuccesses: 2, TotalExclusions: 1}, rollingCB.counts.bucketAt(-1))
 	assert.Equal(t, Counts{Requests: 2, TotalSuccesses: 1, ConsecutiveSuccesses: 1, TotalExclusions: 1}, rollingCB.counts.bucketAt(0))
@@ -370,14 +360,13 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, Counts{Requests: 21, TotalSuccesses: 8, TotalFailures: 6, TotalExclusions: 7, ConsecutiveFailures: 1}, rollingCB.Counts())
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
-	// Calculate indices for buckets relative to current
+
 	assert.Equal(t, Counts{Requests: 15, TotalSuccesses: 5, TotalFailures: 5, TotalExclusions: 5, ConsecutiveFailures: 1}, rollingCB.counts.bucketAt(-3))
 	assert.Equal(t, Counts{Requests: 3, TotalSuccesses: 2, ConsecutiveSuccesses: 2, TotalExclusions: 1}, rollingCB.counts.bucketAt(-2))
 	assert.Equal(t, Counts{Requests: 2, TotalSuccesses: 1, ConsecutiveSuccesses: 1, TotalExclusions: 1}, rollingCB.counts.bucketAt(-1))
 	assert.Equal(t, Counts{Requests: 1, TotalFailures: 1, ConsecutiveFailures: 1}, rollingCB.counts.bucketAt(0))
 
-	// fill all the buckets
-	for i := 0; i < 6; i++ {
+	for i := range 6 {
 		pseudoSleep(rollingCB, time.Duration(3)*time.Second)
 		assert.Nil(t, succeed(rollingCB))
 		assert.Nil(t, fail(rollingCB))
@@ -386,25 +375,23 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
 
-	// first bucket should be discarded
 	pseudoSleep(rollingCB, time.Duration(3)*time.Second)
 	assert.Nil(t, fail(rollingCB))
 	assert.Equal(t, 10, len(rollingCB.counts.buckets))
 	assert.Equal(t, Counts{Requests: 19, TotalSuccesses: 9, TotalFailures: 8, TotalExclusions: 2, ConsecutiveFailures: 2}, rollingCB.Counts())
 
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		assert.Nil(t, fail(rollingCB))
 		assert.Equal(t, Counts{Requests: uint32(20 + i), TotalSuccesses: 9, TotalFailures: uint32(9 + i), TotalExclusions: 2, ConsecutiveFailures: uint32(3 + i)}, rollingCB.Counts())
 	}
 
 	assert.Equal(t, StateClosed, rollingCB.State())
 
-	assert.Nil(t, fail(rollingCB)) //failureRate = 14/23 > 0.6
+	assert.Nil(t, fail(rollingCB))
 	assert.Equal(t, StateOpen, rollingCB.State())
 	assert.False(t, rollingCB.expiry.IsZero())
 	assert.Equal(t, StateChange{"rw", StateClosed, StateOpen}, stateChange)
 
-	// StateOpen to StateHalfOpen
 	pseudoSleep(rollingCB, rollingCB.timeout+time.Nanosecond)
 	assert.Equal(t, StateHalfOpen, rollingCB.State())
 	assert.True(t, rollingCB.expiry.IsZero())
@@ -415,11 +402,10 @@ func TestRollingWindowCircuitBreaker(t *testing.T) {
 	assert.Equal(t, StateHalfOpen, rollingCB.State())
 	assert.Equal(t, Counts{Requests: 2, TotalSuccesses: 2, ConsecutiveSuccesses: 2}, rollingCB.Counts())
 
-	// StateHalfOpen to StateClosed
-	ch := succeedLater(rollingCB, time.Duration(100)*time.Millisecond) // 3 consecutive successes
+	ch := succeedLater(rollingCB, time.Duration(100)*time.Millisecond)
 	time.Sleep(time.Duration(50) * time.Millisecond)
 	assert.Equal(t, Counts{Requests: 3, TotalSuccesses: 2, ConsecutiveSuccesses: 2}, rollingCB.Counts())
-	assert.Error(t, succeed(rollingCB)) // over MaxRequests
+	assert.Error(t, succeed(rollingCB))
 	assert.Nil(t, <-ch)
 	assert.Equal(t, StateClosed, rollingCB.State())
 	assert.Equal(t, Counts{}, rollingCB.Counts())
@@ -441,11 +427,10 @@ func TestGeneration(t *testing.T) {
 	time.Sleep(time.Duration(500) * time.Millisecond)
 	assert.Equal(t, Counts{Requests: 2, TotalSuccesses: 1, ConsecutiveSuccesses: 1}, customCB.Counts())
 
-	time.Sleep(time.Duration(500) * time.Millisecond) // over Interval
+	time.Sleep(time.Duration(500) * time.Millisecond)
 	assert.Equal(t, StateClosed, customCB.State())
 	assert.Equal(t, Counts{}, customCB.Counts())
 
-	// the request from the previous generation has no effect on customCB.windowCounts.Counts
 	assert.Nil(t, <-ch)
 	assert.Equal(t, Counts{}, customCB.Counts())
 }
@@ -456,9 +441,10 @@ func TestCustomIsSuccessful(t *testing.T) {
 	}
 	cb := NewCircuitBreaker[bool](Settings{IsSuccessful: isSuccessful})
 
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		assert.Nil(t, fail(cb))
 	}
+
 	assert.Equal(t, StateClosed, cb.State())
 	assert.Equal(t, Counts{Requests: 5, TotalSuccesses: 5, ConsecutiveSuccesses: 5}, cb.Counts())
 
@@ -468,9 +454,10 @@ func TestCustomIsSuccessful(t *testing.T) {
 		return err == nil
 	}
 
-	for i := 0; i < 6; i++ {
+	for range 6 {
 		assert.Nil(t, fail(cb))
 	}
+
 	assert.Equal(t, StateOpen, cb.State())
 
 }
@@ -485,7 +472,7 @@ func TestCircuitBreakerInParallel(t *testing.T) {
 
 	const numReqs = 10000
 	routine := func() {
-		for i := 0; i < numReqs; i++ {
+		for i := range numReqs {
 			var err error
 			switch i % 2 {
 			case 0:
@@ -501,12 +488,12 @@ func TestCircuitBreakerInParallel(t *testing.T) {
 	}
 
 	const numRoutines = 10
-	for i := 0; i < numRoutines; i++ {
+	for range numRoutines {
 		go routine()
 	}
 
 	total := uint32(numReqs * numRoutines)
-	for i := uint32(0); i < total; i++ {
+	for range total {
 		err := <-ch
 		assert.Nil(t, err)
 	}
@@ -524,22 +511,22 @@ func TestIsExcludedAndIsSuccessfulCombination(t *testing.T) {
 		},
 	})
 
-	// Case 1: excluded error -> should be undetermined (not counted)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		assert.Nil(t, exclude(cb))
 	}
+
 	assert.Equal(t, Counts{Requests: 3, TotalExclusions: 3}, cb.Counts(), "excluded errors must not be counted as success or failure")
 
-	// Case 2: nil error -> IsSuccessful says success
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		assert.Nil(t, succeed(cb))
 	}
+
 	assert.Equal(t, Counts{Requests: 6, TotalSuccesses: 3, ConsecutiveSuccesses: 3, TotalExclusions: 3}, cb.Counts(), "nil errors should be counted as success per IsSuccessful")
 
-	// Case 3: not nil error -> IsSuccessful says failure
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		assert.Nil(t, fail(cb))
 	}
+
 	assert.Equal(t, Counts{Requests: 8, TotalSuccesses: 3, TotalFailures: 2, TotalExclusions: 3, ConsecutiveFailures: 2}, cb.Counts(), "errors should be counted as failures per IsSuccessful")
 }
 
@@ -549,12 +536,9 @@ func TestRollingWindowCircuitBreakerInParallel(t *testing.T) {
 	const numRequests = 100
 
 	var wg sync.WaitGroup
-	wg.Add(numGoroutines)
-
-	for i := 0; i < numGoroutines; i++ {
-		go func() {
-			defer wg.Done()
-			for j := 0; j < numRequests; j++ {
+	for range numGoroutines {
+		wg.Go(func() {
+			for j := range numRequests {
 				switch j % 3 {
 				case 0:
 					assert.Nil(t, succeed(rollingCB))
@@ -564,7 +548,7 @@ func TestRollingWindowCircuitBreakerInParallel(t *testing.T) {
 					assert.Nil(t, exclude(rollingCB))
 				}
 			}
-		}()
+		})
 	}
 
 	wg.Wait()

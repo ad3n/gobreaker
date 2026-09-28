@@ -3,17 +3,16 @@ package gobreaker
 import (
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 )
 
 var (
-	// ErrNoSharedStore is returned when there is no shared store.
 	ErrNoSharedStore = errors.New("no shared store")
-	// ErrNoSharedState is returned when there is no shared state.
+
 	ErrNoSharedState = errors.New("no shared state")
 )
 
-// SharedState represents the shared state of DistributedCircuitBreaker.
 type SharedState struct {
 	State      State     `json:"state"`
 	Generation uint64    `json:"generation"`
@@ -24,7 +23,28 @@ type SharedState struct {
 	Expiry     time.Time `json:"expiry"`
 }
 
-// SharedDataStore stores the shared state of DistributedCircuitBreaker.
+const maxPooledBuckets = 1024
+
+var sharedStatePool = sync.Pool{
+	New: func() any { return new(SharedState) },
+}
+
+func releaseSharedState(state *SharedState) {
+	resetSharedState(state)
+	sharedStatePool.Put(state)
+}
+
+func resetSharedState(state *SharedState) {
+	buckets := state.Buckets
+	if cap(buckets) > maxPooledBuckets {
+		*state = SharedState{}
+		return
+	}
+
+	clear(buckets[:cap(buckets)])
+	*state = SharedState{Buckets: buckets[:0]}
+}
+
 type SharedDataStore interface {
 	Lock(name string) error
 	Unlock(name string) error
@@ -32,13 +52,13 @@ type SharedDataStore interface {
 	SetData(name string, data []byte) error
 }
 
-// DistributedCircuitBreaker extends CircuitBreaker with SharedDataStore.
 type DistributedCircuitBreaker[T any] struct {
 	*CircuitBreaker[T]
-	store SharedDataStore
+	store    SharedDataStore
+	lockKey  string
+	stateKey string
 }
 
-// NewDistributedCircuitBreaker returns a new DistributedCircuitBreaker.
 func NewDistributedCircuitBreaker[T any](store SharedDataStore, settings Settings) (dcb *DistributedCircuitBreaker[T], err error) {
 	if store == nil {
 		return nil, ErrNoSharedStore
@@ -47,23 +67,30 @@ func NewDistributedCircuitBreaker[T any](store SharedDataStore, settings Setting
 	dcb = &DistributedCircuitBreaker[T]{
 		CircuitBreaker: NewCircuitBreaker[T](settings),
 		store:          store,
+		lockKey:        "gobreaker:mutex:" + settings.Name,
+		stateKey:       "gobreaker:state:" + settings.Name,
 	}
 
 	err = dcb.lock()
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
+	defer func(dcb *DistributedCircuitBreaker[T]) {
 		e := dcb.unlock()
 		if err == nil {
 			err = e
 		}
-	}()
+	}(dcb)
 
-	_, err = dcb.getSharedState()
+	shared := sharedStatePool.Get().(*SharedState)
+	defer releaseSharedState(shared)
+
+	err = dcb.readSharedState(shared)
 	if err == ErrNoSharedState {
-		err = dcb.setSharedState(dcb.extract())
+		dcb.extractInto(shared)
+		err = dcb.writeSharedState(shared)
 	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -77,7 +104,12 @@ const (
 )
 
 func (dcb *DistributedCircuitBreaker[T]) mutexKey() string {
-	return "gobreaker:mutex:" + dcb.name
+	const prefix = "gobreaker:mutex:"
+	if len(dcb.lockKey) >= len(prefix) && dcb.lockKey[len(prefix):] == dcb.name {
+		return dcb.lockKey
+	}
+
+	return prefix + dcb.name
 }
 
 func (dcb *DistributedCircuitBreaker[T]) lock() error {
@@ -95,6 +127,7 @@ func (dcb *DistributedCircuitBreaker[T]) lock() error {
 
 		time.Sleep(mutexWaitTime)
 	}
+
 	return err
 }
 
@@ -107,32 +140,47 @@ func (dcb *DistributedCircuitBreaker[T]) unlock() error {
 }
 
 func (dcb *DistributedCircuitBreaker[T]) sharedStateKey() string {
-	return "gobreaker:state:" + dcb.name
+	const prefix = "gobreaker:state:"
+	if len(dcb.stateKey) >= len(prefix) && dcb.stateKey[len(prefix):] == dcb.name {
+		return dcb.stateKey
+	}
+
+	return prefix + dcb.name
 }
 
 func (dcb *DistributedCircuitBreaker[T]) getSharedState() (SharedState, error) {
 	var state SharedState
-	if dcb.store == nil {
-		return state, ErrNoSharedStore
-	}
-
-	data, err := dcb.store.GetData(dcb.sharedStateKey())
-	if len(data) == 0 {
-		return state, ErrNoSharedState
-	} else if err != nil {
-		return state, err
-	}
-
-	err = json.Unmarshal(data, &state)
+	err := dcb.readSharedState(&state)
 	return state, err
 }
 
-func (dcb *DistributedCircuitBreaker[T]) setSharedState(state SharedState) error {
+func (dcb *DistributedCircuitBreaker[T]) readSharedState(state *SharedState) error {
 	if dcb.store == nil {
 		return ErrNoSharedStore
 	}
 
-	data, err := json.Marshal(state)
+	data, err := dcb.store.GetData(dcb.sharedStateKey())
+	if len(data) == 0 {
+		return ErrNoSharedState
+	}
+
+	if err != nil {
+		return err
+	}
+
+	return json.Unmarshal(data, state)
+}
+
+func (dcb *DistributedCircuitBreaker[T]) setSharedState(state SharedState) error {
+	return dcb.writeSharedState(&state)
+}
+
+func (dcb *DistributedCircuitBreaker[T]) writeSharedState(state *SharedState) error {
+	if dcb.store == nil {
+		return ErrNoSharedStore
+	}
+
+	data, err := marshalSharedState(state)
 	if err != nil {
 		return err
 	}
@@ -148,45 +196,45 @@ func (dcb *DistributedCircuitBreaker[T]) inject(shared SharedState) {
 	dcb.generation = shared.Generation
 	dcb.counts.Counts = shared.Counts
 	dcb.counts.age = shared.Age
-	dcb.counts.buckets = copyBuckets(shared.Buckets)
+	if cap(dcb.counts.buckets) < len(shared.Buckets) {
+		dcb.counts.buckets = make([]Counts, len(shared.Buckets))
+	}
+
+	dcb.counts.buckets = dcb.counts.buckets[:len(shared.Buckets)]
+	copy(dcb.counts.buckets, shared.Buckets)
 	dcb.start = shared.Start
 	dcb.expiry = shared.Expiry
 }
 
-func copyBuckets(buckets []Counts) []Counts {
-	if buckets == nil {
-		return []Counts{}
-	}
-
-	counts := make([]Counts, len(buckets))
-	copy(counts, buckets)
-	return counts
+func (dcb *DistributedCircuitBreaker[T]) extract() SharedState {
+	var state SharedState
+	dcb.extractInto(&state)
+	return state
 }
 
-func (dcb *DistributedCircuitBreaker[T]) extract() SharedState {
+func (dcb *DistributedCircuitBreaker[T]) extractInto(state *SharedState) {
 	dcb.mutex.Lock()
 	defer dcb.mutex.Unlock()
 
-	state := SharedState{
+	buckets := state.Buckets
+	if buckets == nil || cap(buckets) < len(dcb.counts.buckets) {
+		buckets = make([]Counts, len(dcb.counts.buckets))
+	}
+
+	buckets = buckets[:len(dcb.counts.buckets)]
+	copy(buckets, dcb.counts.buckets)
+	*state = SharedState{
 		State:      dcb.state,
 		Generation: dcb.generation,
 		Age:        dcb.counts.age,
 		Counts:     dcb.counts.Counts,
-		Buckets:    copyBuckets(dcb.counts.buckets),
+		Buckets:    buckets,
 		Start:      dcb.start,
 		Expiry:     dcb.expiry,
 	}
-
-	return state
 }
 
-// State returns the State of DistributedCircuitBreaker.
 func (dcb *DistributedCircuitBreaker[T]) State() (state State, err error) {
-	shared, err := dcb.getSharedState()
-	if err != nil {
-		return shared.State, err
-	}
-
 	err = dcb.lock()
 	if err != nil {
 		return state, err
@@ -198,21 +246,23 @@ func (dcb *DistributedCircuitBreaker[T]) State() (state State, err error) {
 		}
 	}()
 
-	dcb.inject(shared)
-	state = dcb.CircuitBreaker.State()
-	shared = dcb.extract()
+	shared := sharedStatePool.Get().(*SharedState)
+	defer releaseSharedState(shared)
 
-	err = dcb.setSharedState(shared)
+	err = dcb.readSharedState(shared)
+	if err != nil {
+		return shared.State, err
+	}
+
+	dcb.inject(*shared)
+	state = dcb.CircuitBreaker.State()
+	dcb.extractInto(shared)
+
+	err = dcb.writeSharedState(shared)
 	return state, err
 }
 
-// Execute runs the given request if the DistributedCircuitBreaker accepts it.
 func (dcb *DistributedCircuitBreaker[T]) Execute(req func() (T, error)) (t T, err error) {
-	shared, err := dcb.getSharedState()
-	if err != nil {
-		return t, err
-	}
-
 	err = dcb.lock()
 	if err != nil {
 		return t, err
@@ -224,11 +274,19 @@ func (dcb *DistributedCircuitBreaker[T]) Execute(req func() (T, error)) (t T, er
 		}
 	}()
 
-	dcb.inject(shared)
-	t, err = dcb.CircuitBreaker.Execute(req)
-	shared = dcb.extract()
+	shared := sharedStatePool.Get().(*SharedState)
+	defer releaseSharedState(shared)
 
-	e := dcb.setSharedState(shared)
+	err = dcb.readSharedState(shared)
+	if err != nil {
+		return t, err
+	}
+
+	dcb.inject(*shared)
+	t, err = dcb.CircuitBreaker.Execute(req)
+	dcb.extractInto(shared)
+
+	e := dcb.writeSharedState(shared)
 	if e != nil {
 		return t, e
 	}

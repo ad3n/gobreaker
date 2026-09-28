@@ -1,5 +1,3 @@
-// Package gobreaker implements the Circuit Breaker pattern.
-// See https://msdn.microsoft.com/en-us/library/dn589784.aspx.
 package gobreaker
 
 import (
@@ -9,10 +7,8 @@ import (
 	"time"
 )
 
-// State is a type that represents a state of CircuitBreaker.
 type State int
 
-// These constants are states of CircuitBreaker.
 const (
 	StateClosed State = iota
 	StateHalfOpen
@@ -20,13 +16,11 @@ const (
 )
 
 var (
-	// ErrTooManyRequests is returned when the CB state is half open and the requests count is over the cb maxRequests
 	ErrTooManyRequests = errors.New("too many requests")
-	// ErrOpenState is returned when the CB state is open
+
 	ErrOpenState = errors.New("circuit breaker is open")
 )
 
-// String implements stringer interface.
 func (s State) String() string {
 	switch s {
 	case StateClosed:
@@ -40,10 +34,6 @@ func (s State) String() string {
 	}
 }
 
-// Counts holds the numbers of requests and their successes/failures.
-// CircuitBreaker clears the internal Counts either
-// on the change of the state or at the closed-state intervals.
-// Counts ignores the results of the requests sent before clearing.
 type Counts struct {
 	Requests             uint32
 	TotalSuccesses       uint32
@@ -69,40 +59,9 @@ func (c *Counts) onFailure() {
 }
 
 func (c *Counts) clear() {
-	c.Requests = 0
-	c.TotalSuccesses = 0
-	c.TotalFailures = 0
-	c.ConsecutiveSuccesses = 0
-	c.ConsecutiveFailures = 0
+	*c = Counts{}
 }
 
-// Settings configures CircuitBreaker:
-//
-// Name is the name of the CircuitBreaker.
-//
-// MaxRequests is the maximum number of requests allowed to pass through
-// when the CircuitBreaker is half-open.
-// If MaxRequests is 0, the CircuitBreaker allows only 1 request.
-//
-// Interval is the cyclic period of the closed state
-// for the CircuitBreaker to clear the internal Counts.
-// If Interval is less than or equal to 0, the CircuitBreaker doesn't clear internal Counts during the closed state.
-//
-// Timeout is the period of the open state,
-// after which the state of the CircuitBreaker becomes half-open.
-// If Timeout is less than or equal to 0, the timeout value of the CircuitBreaker is set to 60 seconds.
-//
-// ReadyToTrip is called with a copy of Counts whenever a request fails in the closed state.
-// If ReadyToTrip returns true, the CircuitBreaker will be placed into the open state.
-// If ReadyToTrip is nil, default ReadyToTrip is used.
-// Default ReadyToTrip returns true when the number of consecutive failures is more than 5.
-//
-// OnStateChange is called whenever the state of the CircuitBreaker changes.
-//
-// IsSuccessful is called with the error returned from a request.
-// If IsSuccessful returns true, the error is counted as a success.
-// Otherwise the error is counted as a failure.
-// If IsSuccessful is nil, default IsSuccessful is used, which returns false for all non-nil errors.
 type Settings struct {
 	Name          string
 	MaxRequests   uint32
@@ -113,7 +72,6 @@ type Settings struct {
 	IsSuccessful  func(err error) bool
 }
 
-// CircuitBreaker is a state machine to prevent sending requests that are likely to fail.
 type CircuitBreaker struct {
 	name          string
 	maxRequests   uint32
@@ -130,14 +88,10 @@ type CircuitBreaker struct {
 	expiry     time.Time
 }
 
-// TwoStepCircuitBreaker is like CircuitBreaker but instead of surrounding a function
-// with the breaker functionality, it only checks whether a request can proceed and
-// expects the caller to report the outcome in a separate step using a callback.
 type TwoStepCircuitBreaker struct {
 	cb *CircuitBreaker
 }
 
-// NewCircuitBreaker returns a new CircuitBreaker configured with the given Settings.
 func NewCircuitBreaker(st Settings) *CircuitBreaker {
 	cb := new(CircuitBreaker)
 
@@ -179,7 +133,6 @@ func NewCircuitBreaker(st Settings) *CircuitBreaker {
 	return cb
 }
 
-// NewTwoStepCircuitBreaker returns a new TwoStepCircuitBreaker configured with the given Settings.
 func NewTwoStepCircuitBreaker(st Settings) *TwoStepCircuitBreaker {
 	return &TwoStepCircuitBreaker{
 		cb: NewCircuitBreaker(st),
@@ -197,12 +150,10 @@ func defaultIsSuccessful(err error) bool {
 	return err == nil
 }
 
-// Name returns the name of the CircuitBreaker.
 func (cb *CircuitBreaker) Name() string {
 	return cb.name
 }
 
-// State returns the current state of the CircuitBreaker.
 func (cb *CircuitBreaker) State() State {
 	cb.mutex.Lock()
 	defer cb.mutex.Unlock()
@@ -212,7 +163,6 @@ func (cb *CircuitBreaker) State() State {
 	return state
 }
 
-// Counts returns internal counters
 func (cb *CircuitBreaker) Counts() Counts {
 	cb.mutex.Lock()
 	defer cb.mutex.Unlock()
@@ -220,12 +170,7 @@ func (cb *CircuitBreaker) Counts() Counts {
 	return cb.counts
 }
 
-// Execute runs the given request if the CircuitBreaker accepts it.
-// Execute returns an error instantly if the CircuitBreaker rejects the request.
-// Otherwise, Execute returns the result of the request.
-// If a panic occurs in the request, the CircuitBreaker handles it as an error
-// and causes the same panic again.
-func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{}, error) {
+func (cb *CircuitBreaker) Execute(req func() (any, error)) (any, error) {
 	generation, err := cb.beforeRequest()
 	if err != nil {
 		return nil, err
@@ -244,24 +189,18 @@ func (cb *CircuitBreaker) Execute(req func() (interface{}, error)) (interface{},
 	return result, err
 }
 
-// Name returns the name of the TwoStepCircuitBreaker.
 func (tscb *TwoStepCircuitBreaker) Name() string {
 	return tscb.cb.Name()
 }
 
-// State returns the current state of the TwoStepCircuitBreaker.
 func (tscb *TwoStepCircuitBreaker) State() State {
 	return tscb.cb.State()
 }
 
-// Counts returns internal counters
 func (tscb *TwoStepCircuitBreaker) Counts() Counts {
 	return tscb.cb.Counts()
 }
 
-// Allow checks if a new request can proceed. It returns a callback that should be used to
-// register the success or failure in a separate step. If the circuit breaker doesn't allow
-// requests, it returns an error.
 func (tscb *TwoStepCircuitBreaker) Allow() (done func(success bool), err error) {
 	generation, err := tscb.cb.beforeRequest()
 	if err != nil {
@@ -342,6 +281,7 @@ func (cb *CircuitBreaker) currentState(now time.Time) (State, uint64) {
 			cb.setState(StateHalfOpen, now)
 		}
 	}
+
 	return cb.state, cb.generation
 }
 
@@ -374,7 +314,7 @@ func (cb *CircuitBreaker) toNewGeneration(now time.Time) {
 		}
 	case StateOpen:
 		cb.expiry = now.Add(cb.timeout)
-	default: // StateHalfOpen
+	default:
 		cb.expiry = zero
 	}
 }

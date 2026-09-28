@@ -1,9 +1,5 @@
 package gobreaker
 
-// Counts holds the numbers of requests and their successes/failures/exclusions.
-// CircuitBreaker clears the internal Counts either
-// on the change of the state or at the closed-state intervals.
-// Counts ignores the results of the requests sent before clearing.
 type Counts struct {
 	Requests             uint32
 	TotalSuccesses       uint32
@@ -37,16 +33,12 @@ func (c *Counts) validRequests() uint32 {
 	if c.Requests < c.TotalExclusions {
 		return 0
 	}
+
 	return c.Requests - c.TotalExclusions
 }
 
 func (c *Counts) clear() {
-	c.Requests = 0
-	c.TotalSuccesses = 0
-	c.TotalFailures = 0
-	c.TotalExclusions = 0
-	c.ConsecutiveSuccesses = 0
-	c.ConsecutiveFailures = 0
+	*c = Counts{}
 }
 
 type rollingCounts struct {
@@ -60,6 +52,7 @@ func newRollingCounts(numBuckets int64) *rollingCounts {
 	if numBuckets < 0 {
 		numBuckets = 0
 	}
+
 	return &rollingCounts{
 		buckets: make([]Counts, numBuckets),
 	}
@@ -69,6 +62,7 @@ func (rc *rollingCounts) index(age uint64) uint64 {
 	if len(rc.buckets) == 0 {
 		return 0
 	}
+
 	return age % uint64(len(rc.buckets))
 }
 
@@ -119,9 +113,7 @@ func (rc *rollingCounts) clear() {
 
 	rc.age = 0
 
-	for i := range rc.buckets {
-		rc.buckets[i].clear()
-	}
+	clear(rc.buckets)
 }
 
 func (rc *rollingCounts) roll() {
@@ -145,54 +137,29 @@ func (rc *rollingCounts) subtract(oldest uint64) {
 	bucket := rc.buckets[oldest]
 
 	totalSuccesses := bucket.ConsecutiveSuccesses
-	for i := uint64(1); i < length; i++ {
-		idx := (oldest + i) % length
-		totalSuccesses += rc.buckets[idx].TotalSuccesses
-	}
-	if rc.ConsecutiveSuccesses == totalSuccesses {
-		if rc.ConsecutiveSuccesses > bucket.ConsecutiveSuccesses {
-			rc.ConsecutiveSuccesses -= bucket.ConsecutiveSuccesses
-		} else {
-			rc.ConsecutiveSuccesses = 0
-		}
-	}
-
 	totalFailures := bucket.ConsecutiveFailures
-	for i := uint64(1); i < length; i++ {
-		idx := (oldest + i) % length
-		totalFailures += rc.buckets[idx].TotalFailures
+	for _, other := range rc.buckets[:oldest] {
+		totalSuccesses += other.TotalSuccesses
+		totalFailures += other.TotalFailures
 	}
+
+	for _, other := range rc.buckets[oldest+1:] {
+		totalSuccesses += other.TotalSuccesses
+		totalFailures += other.TotalFailures
+	}
+
+	if rc.ConsecutiveSuccesses == totalSuccesses {
+		rc.ConsecutiveSuccesses -= min(rc.ConsecutiveSuccesses, bucket.ConsecutiveSuccesses)
+	}
+
 	if rc.ConsecutiveFailures == totalFailures {
-		if rc.ConsecutiveFailures > bucket.ConsecutiveFailures {
-			rc.ConsecutiveFailures -= bucket.ConsecutiveFailures
-		} else {
-			rc.ConsecutiveFailures = 0
-		}
+		rc.ConsecutiveFailures -= min(rc.ConsecutiveFailures, bucket.ConsecutiveFailures)
 	}
 
-	if rc.Requests > bucket.Requests {
-		rc.Requests -= bucket.Requests
-	} else {
-		rc.Requests = 0
-	}
-
-	if rc.TotalSuccesses > bucket.TotalSuccesses {
-		rc.TotalSuccesses -= bucket.TotalSuccesses
-	} else {
-		rc.TotalSuccesses = 0
-	}
-
-	if rc.TotalFailures > bucket.TotalFailures {
-		rc.TotalFailures -= bucket.TotalFailures
-	} else {
-		rc.TotalFailures = 0
-	}
-
-	if rc.TotalExclusions > bucket.TotalExclusions {
-		rc.TotalExclusions -= bucket.TotalExclusions
-	} else {
-		rc.TotalExclusions = 0
-	}
+	rc.Requests -= min(rc.Requests, bucket.Requests)
+	rc.TotalSuccesses -= min(rc.TotalSuccesses, bucket.TotalSuccesses)
+	rc.TotalFailures -= min(rc.TotalFailures, bucket.TotalFailures)
+	rc.TotalExclusions -= min(rc.TotalExclusions, bucket.TotalExclusions)
 }
 
 func (rc *rollingCounts) grow(age uint64) {
@@ -204,10 +171,23 @@ func (rc *rollingCounts) grow(age uint64) {
 	if diff >= uint64(len(rc.buckets)) {
 		rc.clear()
 		rc.age = age
-	} else {
-		for range diff {
-			rc.roll()
+		return
+	}
+
+	if diff == 1 {
+		rc.roll()
+		return
+	}
+
+	for range diff {
+		rc.age++
+		current := rc.current()
+		if rc.buckets[current] == (Counts{}) {
+			continue
 		}
+
+		rc.subtract(current)
+		rc.buckets[current].clear()
 	}
 }
 
